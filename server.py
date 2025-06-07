@@ -17,6 +17,8 @@ print(f"Using device: {device}")
 app = Flask(__name__)
 CORS(app)
 
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max upload size
+
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
