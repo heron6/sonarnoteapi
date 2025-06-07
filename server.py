@@ -22,6 +22,8 @@ if not HF_TOKEN:
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading Whisper model on {device}...")
 whisper_model = whisper.load_model("medium").to(device)
+result = whisper_model.transcribe(audio_path, fp16=(device == "cuda"))
+
 
 print("Loading pyannote speaker diarization pipeline (3.1)...")
 pipeline = Pipeline.from_pretrained(
@@ -41,7 +43,7 @@ def transcribe():
 
     try:
         diarization = pipeline(audio_path)
-        result = whisper_model.transcribe(audio_path)
+        result = whisper_model.transcribe(audio_path, fp16=(device == "cuda"))
         segments = result.get("segments", [])
 
         # Map from diarization turn index to assigned segment texts
