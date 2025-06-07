@@ -7,6 +7,11 @@ import torch
 from flask_cors import CORS
 from collections import defaultdict
 
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA device count:", torch.cuda.device_count())
+print("CUDA device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+
+
 app = Flask(__name__)
 CORS(app)
 
