@@ -11,6 +11,8 @@ print("CUDA available:", torch.cuda.is_available())
 print("CUDA device count:", torch.cuda.device_count())
 print("CUDA device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
 app = Flask(__name__)
 CORS(app)
@@ -19,10 +21,11 @@ HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading Whisper model on {device}...")
 whisper_model = whisper.load_model("medium").to(device)
 print("Whisper model loaded successfully.")
+print("Whisper model device:", next(whisper_model.parameters()).device)
+
 print("Loading pyannote speaker diarization pipeline (3.1)...")
 pipeline = Pipeline.from_pretrained(
     "pyannote/speaker-diarization-3.1",
@@ -40,7 +43,10 @@ def transcribe():
         audio_path = tmp.name
 
     try:
-        diarization = pipeline(audio_path)
+        # Run pyannote diarization on the correct device
+        diarization = pipeline(audio_path, device=torch.device(device))
+
+        # Run Whisper transcription with fp16 if using CUDA
         result = whisper_model.transcribe(audio_path, fp16=(device == "cuda"))
         segments = result.get("segments", [])
 
