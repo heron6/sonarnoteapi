@@ -32,6 +32,9 @@ pipeline = Pipeline.from_pretrained(
     use_auth_token=HF_TOKEN
 )
 
+for model in pipeline._models.values():
+    model.to(device)
+
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     if "file" not in request.files:
@@ -44,7 +47,7 @@ def transcribe():
 
     try:
         # Run pyannote diarization on the correct device
-        diarization = pipeline(audio_path, device=torch.device(device))
+        diarization = pipeline(audio_path)
 
         # Run Whisper transcription with fp16 if using CUDA
         result = whisper_model.transcribe(audio_path, fp16=(device == "cuda"))
