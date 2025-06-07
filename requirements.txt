@@ -1,0 +1,6 @@
+flask
+torch
+torchaudio
+faster-whisper
+pyannote.audio
+ffmpeg-python
