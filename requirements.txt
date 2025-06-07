@@ -1,6 +1,6 @@
 flask
+flask-cors
+openai-whisper
 torch
 torchaudio
-openai-whisper
-pyannote.audio
-ffmpeg-python
+pyannote.audio==3.1
