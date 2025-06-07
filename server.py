@@ -1,7 +1,7 @@
 import os
 import tempfile
 from flask import Flask, request, jsonify
-from faster_whisper import WhisperModel
+import whisper
 from pyannote.audio import Pipeline
 
 app = Flask(__name__)
@@ -11,8 +11,8 @@ HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
 
-print("Loading faster-whisper medium model...")
-whisper_model = WhisperModel("medium", device="cuda", compute_type="float16")
+print("Loading OpenAI Whisper medium model...")
+whisper_model = whisper.load_model("medium").to("cuda")
 
 print("Loading pyannote diarization pipeline...")
 pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization", use_auth_token=HF_TOKEN)
@@ -29,15 +29,16 @@ def transcribe():
         audio_path = tmp.name
 
     try:
-        segments, info = whisper_model.transcribe(audio_path)
+        result = whisper_model.transcribe(audio_path)
+        segments = result.get("segments", [])
         results = []
         for segment in segments:
             results.append({
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text.strip()
+                "start": segment["start"],
+                "end": segment["end"],
+                "text": segment["text"].strip()
             })
-        return jsonify({"segments": results, "language": info.language})
+        return jsonify({"segments": results, "language": result.get("language", "unknown")})
     finally:
         os.remove(audio_path)
 
@@ -57,7 +58,8 @@ def process():
         diarization = pipeline(audio_path)
 
         # Transcription
-        segments, _ = whisper_model.transcribe(audio_path)
+        result = whisper_model.transcribe(audio_path)
+        segments = result.get("segments", [])
 
         # Combine diarization and transcription
         results = []
@@ -65,8 +67,8 @@ def process():
             # Find transcription segments overlapping diarization turn
             texts = []
             for seg in segments:
-                if seg.start >= turn.start and seg.end <= turn.end:
-                    texts.append(seg.text.strip())
+                if seg["start"] >= turn.start and seg["end"] <= turn.end:
+                    texts.append(seg["text"].strip())
 
             combined_text = " ".join(texts) if texts else ""
 
