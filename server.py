@@ -43,7 +43,6 @@ def transcribe():
 
     try:
         diarization = pipeline(audio_path)
-        result = whisper_model.transcribe(audio_path, fp16=(device == "cuda"))
         segments = result.get("segments", [])
 
         # Map from diarization turn index to assigned segment texts
