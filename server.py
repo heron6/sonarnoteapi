@@ -11,14 +11,11 @@ from collections import defaultdict
 print("Torch CUDA available:", torch.cuda.is_available())
 print("Torch device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
 
-if torch.cuda.is_available():
-    try:
-        test_tensor = torch.tensor([1.0]).to("cuda")
-        print("Test tensor is on device:", test_tensor.device)
-    except Exception as e:
-        print("Tensor test failed:", e)
-else:
-    print("CUDA not available for tensor test.")
+try:
+    test_tensor = torch.tensor([1.0]).to("cuda" if torch.cuda.is_available() else "cpu")
+    print("PyTorch tensor test device:", test_tensor.device)
+except Exception as e:
+    print("Tensor allocation failed:", str(e))
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
@@ -34,7 +31,6 @@ if not HF_TOKEN:
 
 # Load Whisper with GPU support
 print("Loading faster-whisper model...")
-# Use float32 for broader compatibility across GPUs
 whisper_model = WhisperModel("medium", device=device, compute_type="float32")
 print("faster-whisper model loaded.")
 print("Whisper model backend device:", whisper_model.model.device)
