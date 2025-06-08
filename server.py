@@ -6,9 +6,13 @@ from pyannote.audio import Pipeline
 import torch
 from flask_cors import CORS
 from collections import defaultdict
+import ctranslate2
 
-print("CUDA available:", torch.cuda.is_available())
-print("CUDA device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+# === GPU Diagnostics ===
+print("Torch CUDA available:", torch.cuda.is_available())
+print("Torch device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+print("PyTorch tensor test device:", torch.tensor([1.0]).device)
+print("CTranslate2 device:", ctranslate2.Device.from_string("cuda" if torch.cuda.is_available() else "cpu"))
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
@@ -24,8 +28,10 @@ if not HF_TOKEN:
 
 # Load Whisper with GPU support
 print("Loading faster-whisper model...")
-whisper_model = WhisperModel("medium", device=device, compute_type="float16")
+# Use float32 for broader compatibility
+whisper_model = WhisperModel("medium", device=device, compute_type="float32")
 print("faster-whisper model loaded.")
+print("Whisper model backend device:", whisper_model.model.device)
 
 # Load pyannote pipeline
 print("Loading pyannote speaker diarization pipeline...")
@@ -33,8 +39,12 @@ pipeline = Pipeline.from_pretrained(
     "pyannote/speaker-diarization-3.1",
     use_auth_token=HF_TOKEN
 )
-for model in pipeline._models.values():
+
+# Move all submodels to GPU (if available)
+for name, model in pipeline._models.items():
     model.to(device)
+    print(f"{name} moved to: {next(model.parameters()).device}")
+
 print("pyannote pipeline loaded.")
 
 @app.route("/transcribe", methods=["POST"])
