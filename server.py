@@ -4,6 +4,8 @@ import os
 import whisper
 import torchaudio
 import subprocess
+from pyannote.audio import Pipeline
+import torch
 
 app = Flask(__name__)
 CORS(app)
@@ -11,9 +13,15 @@ CORS(app)
 # Load Whisper model on GPU
 whisper_model = whisper.load_model("medium", device="cuda")
 
+# Load pyannote speaker diarization pipeline on GPU
+diarization_pipeline = Pipeline.from_pretrained(
+    "pyannote/speaker-diarization",
+    use_auth_token=os.getenv("HUGGINGFACE_TOKEN")  # Set this in your environment
+).to(torch.device("cuda"))
+
 @app.route("/")
 def index():
-    return "Whisper transcription server running (GPU-only, no document output)."
+    return "Whisper + Pyannote transcription server running (GPU-only, with speaker diarization)."
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -22,8 +30,6 @@ def upload_file():
     file = request.files['file']
     if file.filename == '':
         return 'No selected file', 400
-
-    timestamps_enabled = request.form.get('timestamps') == 'true'
 
     os.makedirs('temp', exist_ok=True)
     original_path = os.path.join('temp', file.filename)
@@ -34,30 +40,47 @@ def upload_file():
     except RuntimeError as e:
         return str(e), 500
 
+    # Optional: limit to 60 seconds for testing
+    waveform, sample_rate = torchaudio.load(filepath)
+    max_samples = 60 * sample_rate
+    if waveform.shape[1] > max_samples:
+        waveform = waveform[:, :max_samples]
+        torchaudio.save(filepath, waveform, sample_rate)
+
     print("Starting transcription.")
     result = whisper_model.transcribe(filepath, language="en")
     segments = result.get("segments", [])
     print("Transcription done.")
 
-    # Group segments (no speaker info)
-    grouped_segments = []
-    if segments:
-        current_group = {
-            "start": segments[0]["start"],
-            "end": segments[0]["end"],
-            "text": segments[0]["text"]
-        }
+    print("Running speaker diarization.")
+    diarization = diarization_pipeline(filepath)
+    print("Diarization complete.")
 
-        for segment in segments[1:]:
-            current_group["end"] = segment["end"]
-            current_group["text"] += " " + segment["text"]
-        grouped_segments.append(current_group)
+    # Match Whisper segments to speaker turns
+    speaker_segments = []
+    for segment in segments:
+        start = segment["start"]
+        end = segment["end"]
+        text = segment["text"]
+        speaker_label = "Unknown"
 
-    transcription_text = " ".join([seg["text"] for seg in grouped_segments])
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            if turn.start <= start <= turn.end or turn.start <= end <= turn.end:
+                speaker_label = speaker
+                break
+
+        speaker_segments.append({
+            "start": start,
+            "end": end,
+            "speaker": speaker_label,
+            "text": text
+        })
+
+    full_text = " ".join([f"{seg['speaker']}: {seg['text']}" for seg in speaker_segments])
 
     return {
-        'transcription': transcription_text,
-        'segments': grouped_segments,
+        'transcription': full_text,
+        'segments': speaker_segments
     }
 
 def convert_to_wav(input_path):
