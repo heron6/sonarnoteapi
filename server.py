@@ -34,13 +34,6 @@ def upload_file():
     except RuntimeError as e:
         return str(e), 500
 
-    # Optional: limit to 60 seconds for testing
-    waveform, sample_rate = torchaudio.load(filepath)
-    max_samples = 60 * sample_rate
-    if waveform.shape[1] > max_samples:
-        waveform = waveform[:, :max_samples]
-        torchaudio.save(filepath, waveform, sample_rate)
-
     print("Starting transcription.")
     result = whisper_model.transcribe(filepath, language="en")
     segments = result.get("segments", [])
