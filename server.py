@@ -123,12 +123,13 @@ def transcribe():
         results = []
         for i, (turn, _, speaker) in enumerate(diarization_turns):
             combined_text = " ".join(turn_segments[i]) if i in turn_segments else ""
-            results.append({
-                "start": round(turn.start, 2),
-                "end": round(turn.end, 2),
-                "speaker": speaker_mapping.get(speaker, speaker),
-                "text": combined_text,
-            })
+            if combined_text:  # Only include if there's actual speech
+                results.append({
+                    "start": round(turn.start, 2),
+                    "end": round(turn.end, 2),
+                    "speaker": speaker_mapping.get(speaker, speaker),
+                    "text": combined_text,
+                })
 
         # Merge consecutive same-speaker blocks
         merged_results = []
