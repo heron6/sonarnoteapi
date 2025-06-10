@@ -1,5 +1,6 @@
 import os
 import tempfile
+import subprocess
 from flask import Flask, request, jsonify
 from pyannote.audio import Pipeline
 import torch
@@ -23,6 +24,13 @@ print(f"Using device: {device}")
 app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
+
+# === Error Handling ===
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    traceback.print_exc()
+    return jsonify({"error": str(e)}), 500
 
 # Load HuggingFace token
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
@@ -67,13 +75,24 @@ def transcribe():
         f.save(tmp.name)
         audio_path = tmp.name
 
+    normalized_path = audio_path.replace(".wav", "_normalized.wav")
+
     try:
+        # === Normalize audio with ffmpeg ===
+        print("Normalizing audio with ffmpeg...")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", audio_path,
+            "-ac", "1", "-ar", "16000",
+            normalized_path
+        ], check=True)
+        print("Audio normalization complete.")
+
         # Run speaker diarization
-        diarization = pipeline(audio_path)
+        diarization = pipeline(normalized_path)
         diarization_turns = list(diarization.itertracks(yield_label=True))
 
         # Run Whisper transcription (local model)
-        result = whisper_model.transcribe(audio_path, verbose=False)
+        result = whisper_model.transcribe(normalized_path, verbose=False)
         segments = result.get("segments", [])
 
         # Assign Whisper segments to diarization turns
@@ -134,8 +153,11 @@ def transcribe():
             "lines": merged_results,
             "file": None
         })
+
     finally:
         os.remove(audio_path)
+        if os.path.exists(normalized_path):
+            os.remove(normalized_path)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5002)
