@@ -17,9 +17,10 @@ whisper_model = whisper.load_model("medium", device=device)
 
 # Load pyannote speaker diarization pipeline on GPU
 diarization_pipeline = Pipeline.from_pretrained(
-    "pyannote/speaker-diarization",
+    "pyannote/speaker-diarization-3.1",
     use_auth_token=os.getenv("HUGGINGFACE_TOKEN")  # Set this in your environment
 ).to(device)
+print(device)
 
 @app.route("/")
 def index():
