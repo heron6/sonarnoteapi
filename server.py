@@ -34,6 +34,15 @@ print("Loading OpenAI Whisper model...")
 whisper_model = whisper.load_model("medium", device=device)
 print("Whisper model loaded.")
 
+# === Whisper GPU diagnostics ===
+print("Whisper model device:", next(whisper_model.parameters()).device)
+for name, param in whisper_model.named_parameters():
+    print(f"Param '{name}' loaded on: {param.device}")
+    break  # one example is enough
+
+print("GPU Memory Allocated:", torch.cuda.memory_allocated() / 1e6, "MB")
+print("GPU Memory Reserved:", torch.cuda.memory_reserved() / 1e6, "MB")
+
 # Load pyannote pipeline
 print("Loading pyannote speaker diarization pipeline...")
 pipeline = Pipeline.from_pretrained(
