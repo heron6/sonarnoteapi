@@ -1,103 +1,132 @@
-from flask import Flask, request
-from flask_cors import CORS
 import os
-import whisper
-import torchaudio
-import subprocess
+import tempfile
+from flask import Flask, request, jsonify
 from pyannote.audio import Pipeline
 import torch
+import whisper
+from flask_cors import CORS
+from collections import defaultdict
+
+# === GPU Diagnostics ===
+print("Torch CUDA available:", torch.cuda.is_available())
+print("Torch device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+
+try:
+    test_tensor = torch.tensor([1.0]).to("cuda" if torch.cuda.is_available() else "cpu")
+    print("PyTorch tensor test device:", test_tensor.device)
+except Exception as e:
+    print("Tensor allocation failed:", str(e))
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
 app = Flask(__name__)
 CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Load HuggingFace token
+HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+if not HF_TOKEN:
+    raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
 
-# Load Whisper model on GPU
+# Load Whisper (OpenAI local model)
+print("Loading OpenAI Whisper model...")
 whisper_model = whisper.load_model("medium", device=device)
+print("Whisper model loaded.")
 
-# Load pyannote speaker diarization pipeline on GPU
-diarization_pipeline = Pipeline.from_pretrained(
+# Load pyannote pipeline
+print("Loading pyannote speaker diarization pipeline...")
+pipeline = Pipeline.from_pretrained(
     "pyannote/speaker-diarization-3.1",
-    use_auth_token=os.getenv("HUGGINGFACE_TOKEN")  # Set this in your environment
-).to(device)
-print(device)
+    use_auth_token=HF_TOKEN
+)
 
-@app.route("/")
-def index():
-    return "Whisper + Pyannote transcription server running (GPU-only, with speaker diarization)."
+# Move all submodels to GPU (if available)
+for name, model in pipeline._models.items():
+    model.to(device)
+    print(f"{name} moved to: {next(model.parameters()).device}")
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return 'No file part', 400
-    file = request.files['file']
-    if file.filename == '':
-        return 'No selected file', 400
+print("pyannote pipeline loaded.")
 
-    os.makedirs('temp', exist_ok=True)
-    original_path = os.path.join('temp', file.filename)
-    file.save(original_path)
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+    if "file" not in request.files:
+        return jsonify({"error": "Missing file"}), 400
+
+    f = request.files["file"]
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        f.save(tmp.name)
+        audio_path = tmp.name
 
     try:
-        filepath = convert_to_wav(original_path)
-    except RuntimeError as e:
-        return str(e), 500
+        # Run speaker diarization
+        diarization = pipeline(audio_path)
+        diarization_turns = list(diarization.itertracks(yield_label=True))
 
-    # Optional: limit to 60 seconds for testing
-    waveform, sample_rate = torchaudio.load(filepath)
-    max_samples = 60 * sample_rate
-    if waveform.shape[1] > max_samples:
-        waveform = waveform[:, :max_samples]
-        torchaudio.save(filepath, waveform, sample_rate)
+        # Run Whisper transcription (local model)
+        result = whisper_model.transcribe(audio_path, verbose=False)
+        segments = result.get("segments", [])
 
-    print("Starting transcription.")
-    result = whisper_model.transcribe(filepath, language="en")
-    segments = result.get("segments", [])
-    print("Transcription done.")
+        # Assign Whisper segments to diarization turns
+        turn_segments = defaultdict(list)
+        for seg in segments:
+            seg_start, seg_end = seg['start'], seg['end']
+            max_overlap = 0
+            assigned_turn_idx = None
 
-    print("Running speaker diarization.")
-    diarization = diarization_pipeline(filepath)
-    print("Diarization complete.")
+            for i, (turn, _, _) in enumerate(diarization_turns):
+                overlap = max(0, min(seg_end, turn.end) - max(seg_start, turn.start))
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    assigned_turn_idx = i
 
-    # Match Whisper segments to speaker turns
-    speaker_segments = []
-    for segment in segments:
-        start = segment["start"]
-        end = segment["end"]
-        text = segment["text"]
-        speaker_label = "Unknown"
+            if assigned_turn_idx is not None:
+                turn_segments[assigned_turn_idx].append(seg['text'].strip())
 
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            if turn.start <= start <= turn.end or turn.start <= end <= turn.end:
-                speaker_label = speaker
-                break
+        # Identify and remap speakers
+        speaker_first_appearance = {}
+        for turn, _, speaker in diarization_turns:
+            if speaker not in speaker_first_appearance:
+                speaker_first_appearance[speaker] = turn.start
+        sorted_speakers = sorted(speaker_first_appearance.items(), key=lambda x: x[1])
+        speaker_mapping = {old: f"SPEAKER_{i:02d}" for i, (old, _) in enumerate(sorted_speakers)}
 
-        speaker_segments.append({
-            "start": start,
-            "end": end,
-            "speaker": speaker_label,
-            "text": text
+        # Build initial result
+        results = []
+        for i, (turn, _, speaker) in enumerate(diarization_turns):
+            combined_text = " ".join(turn_segments[i]) if i in turn_segments else ""
+            results.append({
+                "start": round(turn.start, 2),
+                "end": round(turn.end, 2),
+                "speaker": speaker_mapping.get(speaker, speaker),
+                "text": combined_text,
+            })
+
+        # Merge consecutive same-speaker blocks
+        merged_results = []
+        prev = None
+        for r in results:
+            if prev and r["speaker"] == prev["speaker"]:
+                prev["end"] = r["end"]
+                if r["text"]:
+                    prev["text"] = f"{prev['text']} {r['text']}".strip()
+            else:
+                if prev:
+                    merged_results.append(prev)
+                prev = r
+        if prev:
+            merged_results.append(prev)
+
+        # Full transcript
+        full_text = result["text"]
+
+        return jsonify({
+            "transcription": full_text,
+            "lines": merged_results,
+            "file": None
         })
-
-    full_text = " ".join([f"{seg['speaker']}: {seg['text']}" for seg in speaker_segments])
-
-    return {
-        'transcription': full_text,
-        'segments': speaker_segments
-    }
-
-def convert_to_wav(input_path):
-    output_path = input_path.rsplit('.', 1)[0] + '.wav'
-    try:
-        subprocess.run(
-            ['ffmpeg', '-y', '-i', input_path, output_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return output_path
-    except subprocess.CalledProcessError:
-        raise RuntimeError("Failed to convert audio to WAV format.")
+    finally:
+        os.remove(audio_path)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=5002)
