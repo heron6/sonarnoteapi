@@ -10,14 +10,16 @@ import torch
 app = Flask(__name__)
 CORS(app)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # Load Whisper model on GPU
-whisper_model = whisper.load_model("medium", device="cuda")
+whisper_model = whisper.load_model("medium", device=device)
 
 # Load pyannote speaker diarization pipeline on GPU
 diarization_pipeline = Pipeline.from_pretrained(
     "pyannote/speaker-diarization",
     use_auth_token=os.getenv("HUGGINGFACE_TOKEN")  # Set this in your environment
-).to(torch.device("cuda"))
+).to(device)
 
 @app.route("/")
 def index():
