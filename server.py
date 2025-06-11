@@ -92,7 +92,7 @@ def transcribe():
         diarization_turns = list(diarization.itertracks(yield_label=True))
 
         # Run Whisper transcription (local model)
-        result = whisper_model.transcribe(normalized_path, verbose=False)
+        result = whisper_model.transcribe(normalized_path, verbose=False, language="en")
         segments = result.get("segments", [])
 
         # Assign Whisper segments to diarization turns
