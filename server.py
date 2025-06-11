@@ -133,4 +133,29 @@ def transcribe():
         prev = None
         for r in results:
             if prev and r["speaker"] == prev["speaker"]:
-                prev["end"] = r
+                prev["end"] = r["end"]
+                if r["text"]:
+                    prev["text"] = f"{prev['text']} {r['text']}".strip()
+            else:
+                if prev:
+                    merged_results.append(prev)
+                prev = r
+        if prev:
+            merged_results.append(prev)
+
+        # Full transcript
+        full_text = " ".join([s.text for s in segments])
+
+        return jsonify({
+            "transcription": full_text,
+            "lines": merged_results,
+            "file": None
+        })
+
+    finally:
+        os.remove(audio_path)
+        if os.path.exists(normalized_path):
+            os.remove(normalized_path)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5002)
