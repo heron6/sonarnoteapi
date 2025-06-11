@@ -1,12 +1,13 @@
 import os
 import tempfile
 import subprocess
+import time
 from flask import Flask, request, jsonify
 from pyannote.audio import Pipeline
 import torch
-import whisper
 from flask_cors import CORS
 from collections import defaultdict
+from faster_whisper import WhisperModel  # ✅ Replaces original Whisper
 
 # === GPU Diagnostics ===
 print("Torch CUDA available:", torch.cuda.is_available())
@@ -37,19 +38,10 @@ HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
 
-# Load Whisper (OpenAI local model)
-print("Loading OpenAI Whisper model...")
-whisper_model = whisper.load_model("medium", device=device)
-print("Whisper model loaded.")
-
-# === Whisper GPU diagnostics ===
-print("Whisper model device:", next(whisper_model.parameters()).device)
-for name, param in whisper_model.named_parameters():
-    print(f"Param '{name}' loaded on: {param.device}")
-    break  # one example is enough
-
-print("GPU Memory Allocated:", torch.cuda.memory_allocated() / 1e6, "MB")
-print("GPU Memory Reserved:", torch.cuda.memory_reserved() / 1e6, "MB")
+# === Load Faster-Whisper model (replaces original Whisper) ===
+print("Loading Faster-Whisper model...")
+whisper_model = WhisperModel("medium", device=device, compute_type="float16" if device == "cuda" else "int8")
+print("Faster-Whisper model loaded.")
 
 # Load pyannote pipeline
 print("Loading pyannote speaker diarization pipeline...")
@@ -79,26 +71,31 @@ def transcribe():
 
     try:
         # === Normalize audio with ffmpeg ===
+        start = time.time()
         print("Normalizing audio with ffmpeg...")
         subprocess.run([
             "ffmpeg", "-y", "-i", audio_path,
             "-ac", "1", "-ar", "16000",
             normalized_path
         ], check=True)
-        print("Audio normalization complete.")
+        print(f"Audio normalization complete. Took {time.time() - start:.2f}s")
 
-        # Run speaker diarization
+        # === Speaker Diarization ===
+        start = time.time()
         diarization = pipeline(normalized_path)
         diarization_turns = list(diarization.itertracks(yield_label=True))
+        print(f"Diarization complete. Took {time.time() - start:.2f}s")
 
-        # Run Whisper transcription (local model)
-        result = whisper_model.transcribe(normalized_path, verbose=False, language="en")
-        segments = result.get("segments", [])
+        # === Whisper Transcription ===
+        start = time.time()
+        segments, info = whisper_model.transcribe(normalized_path, language="en")
+        segments = list(segments)
+        print(f"Whisper transcription complete. Took {time.time() - start:.2f}s")
 
         # Assign Whisper segments to diarization turns
         turn_segments = defaultdict(list)
         for seg in segments:
-            seg_start, seg_end = seg['start'], seg['end']
+            seg_start, seg_end = seg.start, seg.end
             max_overlap = 0
             assigned_turn_idx = None
 
@@ -109,7 +106,7 @@ def transcribe():
                     assigned_turn_idx = i
 
             if assigned_turn_idx is not None:
-                turn_segments[assigned_turn_idx].append(seg['text'].strip())
+                turn_segments[assigned_turn_idx].append(seg.text.strip())
 
         # Identify and remap speakers
         speaker_first_appearance = {}
@@ -136,29 +133,4 @@ def transcribe():
         prev = None
         for r in results:
             if prev and r["speaker"] == prev["speaker"]:
-                prev["end"] = r["end"]
-                if r["text"]:
-                    prev["text"] = f"{prev['text']} {r['text']}".strip()
-            else:
-                if prev:
-                    merged_results.append(prev)
-                prev = r
-        if prev:
-            merged_results.append(prev)
-
-        # Full transcript
-        full_text = result["text"]
-
-        return jsonify({
-            "transcription": full_text,
-            "lines": merged_results,
-            "file": None
-        })
-
-    finally:
-        os.remove(audio_path)
-        if os.path.exists(normalized_path):
-            os.remove(normalized_path)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5002)
+                prev["end"] = r
