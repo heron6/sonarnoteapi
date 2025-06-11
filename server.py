@@ -3,59 +3,34 @@ import tempfile
 import subprocess
 import time
 from flask import Flask, request, jsonify
-from pyannote.audio import Pipeline
-import torch
 from flask_cors import CORS
 from collections import defaultdict
-from faster_whisper import WhisperModel  # ✅ Replaces original Whisper
-
-# === GPU Diagnostics ===
-print("Torch CUDA available:", torch.cuda.is_available())
-print("Torch device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
-
-try:
-    test_tensor = torch.tensor([1.0]).to("cuda" if torch.cuda.is_available() else "cpu")
-    print("PyTorch tensor test device:", test_tensor.device)
-except Exception as e:
-    print("Tensor allocation failed:", str(e))
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+from faster_whisper import WhisperModel
+from pyannote.audio.pipelines import SpeakerDiarization
+from pyannote.audio import Model, Inference
+import torch
 
 app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 
-# === Error Handling ===
-@app.errorhandler(Exception)
-def handle_exception(e):
-    import traceback
-    traceback.print_exc()
-    return jsonify({"error": str(e)}), 500
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
-# Load HuggingFace token
-HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
-if not HF_TOKEN:
-    raise RuntimeError("Please set HUGGINGFACE_TOKEN environment variable")
-
-# === Load Faster-Whisper model (replaces original Whisper) ===
-print("Loading Faster-Whisper model...")
+# === Load Faster-Whisper model
+print("Loading Faster-Whisper...")
 whisper_model = WhisperModel("medium", device=device, compute_type="float16" if device == "cuda" else "int8")
-print("Faster-Whisper model loaded.")
+print("Whisper loaded.")
 
-# Load pyannote pipeline
-print("Loading pyannote speaker diarization pipeline...")
-pipeline = Pipeline.from_pretrained(
-    "pyannote/speaker-diarization-3.1",
-    use_auth_token=HF_TOKEN
-)
-
-# Move all submodels to GPU (if available)
-for name, model in pipeline._models.items():
-    model.to(device)
-    print(f"{name} moved to: {next(model.parameters()).device}")
-
-print("pyannote pipeline loaded.")
+# === Load pyannote v2.1 pipeline
+print("Loading pyannote 2.1 SpeakerDiarization pipeline...")
+pipeline = SpeakerDiarization(segmentation="pyannote/segmentation")
+pipeline.instantiate({
+    "segmentation": {
+        "device": device
+    }
+})
+print("pyannote 2.1 pipeline loaded.")
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
@@ -70,29 +45,29 @@ def transcribe():
     normalized_path = audio_path.replace(".wav", "_normalized.wav")
 
     try:
-        # === Normalize audio with ffmpeg ===
+        # === Normalize with ffmpeg
         start = time.time()
-        print("Normalizing audio with ffmpeg...")
+        print("Normalizing audio...")
         subprocess.run([
             "ffmpeg", "-y", "-i", audio_path,
             "-ac", "1", "-ar", "16000",
             normalized_path
         ], check=True)
-        print(f"Audio normalization complete. Took {time.time() - start:.2f}s")
+        print(f"Normalization took {time.time() - start:.2f}s")
 
-        # === Speaker Diarization ===
+        # === Diarization
         start = time.time()
-        diarization = pipeline(normalized_path)
+        diarization = pipeline({'uri': 'file', 'audio': normalized_path})
         diarization_turns = list(diarization.itertracks(yield_label=True))
-        print(f"Diarization complete. Took {time.time() - start:.2f}s")
+        print(f"Diarization took {time.time() - start:.2f}s")
 
-        # === Whisper Transcription ===
+        # === Whisper transcription
         start = time.time()
-        segments, info = whisper_model.transcribe(normalized_path, language="en")
+        segments, _ = whisper_model.transcribe(normalized_path, language="en")
         segments = list(segments)
-        print(f"Whisper transcription complete. Took {time.time() - start:.2f}s")
+        print(f"Whisper took {time.time() - start:.2f}s")
 
-        # Assign Whisper segments to diarization turns
+        # === Map transcription segments to speaker turns
         turn_segments = defaultdict(list)
         for seg in segments:
             seg_start, seg_end = seg.start, seg.end
@@ -108,7 +83,7 @@ def transcribe():
             if assigned_turn_idx is not None:
                 turn_segments[assigned_turn_idx].append(seg.text.strip())
 
-        # Identify and remap speakers
+        # === Remap speaker labels
         speaker_first_appearance = {}
         for turn, _, speaker in diarization_turns:
             if speaker not in speaker_first_appearance:
@@ -116,11 +91,11 @@ def transcribe():
         sorted_speakers = sorted(speaker_first_appearance.items(), key=lambda x: x[1])
         speaker_mapping = {old: f"SPEAKER_{i:02d}" for i, (old, _) in enumerate(sorted_speakers)}
 
-        # Build initial result
+        # === Build final results
         results = []
         for i, (turn, _, speaker) in enumerate(diarization_turns):
             combined_text = " ".join(turn_segments[i]) if i in turn_segments else ""
-            if combined_text:  # Only include if there's actual speech
+            if combined_text:
                 results.append({
                     "start": round(turn.start, 2),
                     "end": round(turn.end, 2),
@@ -128,14 +103,13 @@ def transcribe():
                     "text": combined_text,
                 })
 
-        # Merge consecutive same-speaker blocks
+        # === Merge consecutive same-speaker blocks
         merged_results = []
         prev = None
         for r in results:
             if prev and r["speaker"] == prev["speaker"]:
                 prev["end"] = r["end"]
-                if r["text"]:
-                    prev["text"] = f"{prev['text']} {r['text']}".strip()
+                prev["text"] = f"{prev['text']} {r['text']}".strip()
             else:
                 if prev:
                     merged_results.append(prev)
@@ -143,7 +117,6 @@ def transcribe():
         if prev:
             merged_results.append(prev)
 
-        # Full transcript
         full_text = " ".join([s.text for s in segments])
 
         return jsonify({
