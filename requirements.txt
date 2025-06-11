@@ -1,11 +1,14 @@
-flask
-flask-cors
-faster-whisper
-torch>=2.0
-torchaudio
-pyannote.audio==3.1
-transformers  # Needed by pyannote.audio
-numpy         # Sometimes needed for audio models
-scipy         # Safer for audio I/O processing
-huggingface-hub  # Required for model downloading
-ctranslate2
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+transformers>=4.35.2
+torch>=2.0.0
+torchaudio>=2.0.0
+librosa>=0.10.1
+numpy>=1.24.3
+scipy>=1.11.4
+pyannote.audio>=3.1.1
+python-dotenv>=1.0.0
+pydub>=0.25.1
+ffmpeg-python>=0.2.0
+requests>=2.31.0 
