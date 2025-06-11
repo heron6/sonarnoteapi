@@ -16,6 +16,7 @@ import time
 import math 
 from dotenv import load_dotenv
 load_dotenv()
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
 app = FastAPI(title="Audio Transcription API", version="1.0.0")
 
@@ -76,7 +77,7 @@ async def load_models():
         # Note: You need to accept user conditions at https://huggingface.co/pyannote/speaker-diarization-3.1
         diarization_pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            "use_auth_token": os.getenv("HUGGINGFACE_TOKEN")
+            use_auth_token=HUGGINGFACE_TOKEN
         )
         
         print("✅ Models loaded successfully!")
