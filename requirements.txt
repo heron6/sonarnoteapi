@@ -7,4 +7,3 @@ transformers  # Needed by pyannote.audio
 numpy         # Sometimes needed for audio models
 scipy         # Safer for audio I/O processing
 huggingface-hub  # Required for model downloading
-ctranslate2
