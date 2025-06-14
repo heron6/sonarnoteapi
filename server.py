@@ -4,33 +4,36 @@ import subprocess
 import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from collections import defaultdict
-from faster_whisper import WhisperModel
-from pyannote.audio.pipelines import SpeakerDiarization
-from pyannote.audio import Model, Inference
+import whisper
+from pyannote.audio import Pipeline
 import torch
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# === Load Faster-Whisper model
-print("Loading Faster-Whisper...")
-whisper_model = WhisperModel("medium", device=device, compute_type="float16" if device == "cuda" else "int8")
+# === Load Whisper model
+print("Loading Whisper...")
+whisper_model = whisper.load_model("medium", device=device)
 print("Whisper loaded.")
 
-# === Load pyannote v2.1 pipeline
-print("Loading pyannote 2.1 SpeakerDiarization pipeline...")
-pipeline = SpeakerDiarization(segmentation="pyannote/segmentation")
-pipeline.instantiate({
-    "segmentation": {
-        "device": device
-    }
-})
-print("pyannote 2.1 pipeline loaded.")
+# === Check for HuggingFace token
+hf_token = os.getenv("HUGGINGFACE_TOKEN")
+if not hf_token:
+    raise EnvironmentError("Missing HUGGINGFACE_TOKEN environment variable.")
+
+# === Load pyannote SpeakerDiarization pipeline
+print("Loading pyannote SpeakerDiarization pipeline...")
+pipeline = Pipeline.from_pretrained(
+    "pyannote/speaker-diarization-3.1",
+    use_auth_token=hf_token
+)
+pipeline.to(device)
+print(f"pyannote pipeline loaded on {device}")
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
@@ -42,12 +45,14 @@ def transcribe():
         f.save(tmp.name)
         audio_path = tmp.name
 
-    normalized_path = audio_path.replace(".wav", "_normalized.wav")
+    # Safe normalized path
+    base, ext = os.path.splitext(audio_path)
+    normalized_path = f"{base}_normalized{ext}"
 
     try:
         # === Normalize with ffmpeg
-        start = time.time()
         print("Normalizing audio...")
+        start = time.time()
         subprocess.run([
             "ffmpeg", "-y", "-i", audio_path,
             "-ac", "1", "-ar", "16000",
@@ -55,76 +60,89 @@ def transcribe():
         ], check=True)
         print(f"Normalization took {time.time() - start:.2f}s")
 
-        # === Diarization
+        # === Speaker diarization
+        print("Running speaker diarization...")
         start = time.time()
         diarization = pipeline({'uri': 'file', 'audio': normalized_path})
         diarization_turns = list(diarization.itertracks(yield_label=True))
         print(f"Diarization took {time.time() - start:.2f}s")
 
         # === Whisper transcription
+        print("Running Whisper transcription...")
         start = time.time()
-        segments, _ = whisper_model.transcribe(normalized_path, language="en")
-        segments = list(segments)
+        result = whisper_model.transcribe(
+            normalized_path,
+            language="en",
+            fp16=(device.type == "cuda")
+        )
         print(f"Whisper took {time.time() - start:.2f}s")
 
-        # === Map transcription segments to speaker turns
+        # === Collect Whisper segments
+        segments = [{
+            "start": s["start"],
+            "end": s["end"],
+            "text": s["text"]
+        } for s in result["segments"]]
+
+        # === Align segments to diarization speaker turns with improved logic
+        print("Aligning speaker labels to segments...")
         turn_segments = defaultdict(list)
-        for seg in segments:
-            seg_start, seg_end = seg.start, seg.end
-            max_overlap = 0
-            assigned_turn_idx = None
 
-            for i, (turn, _, _) in enumerate(diarization_turns):
+        for s in segments:
+            seg_start = s["start"]
+            seg_end = s["end"]
+            best_match = None
+            best_overlap = 0
+
+            for i, (turn, _, speaker) in enumerate(diarization_turns):
                 overlap = max(0, min(seg_end, turn.end) - max(seg_start, turn.start))
-                if overlap > max_overlap:
-                    max_overlap = overlap
-                    assigned_turn_idx = i
+                duration = seg_end - seg_start
+                overlap_ratio = overlap / duration if duration > 0 else 0
 
-            if assigned_turn_idx is not None:
-                turn_segments[assigned_turn_idx].append(seg.text.strip())
+                # Only assign if overlap is at least 25% of the segment duration
+                if overlap_ratio > 0.25 and overlap > best_overlap:
+                    best_overlap = overlap
+                    best_match = i
 
-        # === Remap speaker labels
-        speaker_first_appearance = {}
-        for turn, _, speaker in diarization_turns:
-            if speaker not in speaker_first_appearance:
-                speaker_first_appearance[speaker] = turn.start
-        sorted_speakers = sorted(speaker_first_appearance.items(), key=lambda x: x[1])
-        speaker_mapping = {old: f"SPEAKER_{i:02d}" for i, (old, _) in enumerate(sorted_speakers)}
-
-        # === Build final results
-        results = []
-        for i, (turn, _, speaker) in enumerate(diarization_turns):
-            combined_text = " ".join(turn_segments[i]) if i in turn_segments else ""
-            if combined_text:
-                results.append({
-                    "start": round(turn.start, 2),
-                    "end": round(turn.end, 2),
-                    "speaker": speaker_mapping.get(speaker, speaker),
-                    "text": combined_text,
+            if best_match is not None:
+                turn, _, speaker = diarization_turns[best_match]
+                turn_segments[best_match].append({
+                    "start": s["start"],
+                    "end": s["end"],
+                    "speaker": speaker,
+                    "text": s["text"]
                 })
 
-        # === Merge consecutive same-speaker blocks
-        merged_results = []
-        prev = None
-        for r in results:
-            if prev and r["speaker"] == prev["speaker"]:
-                prev["end"] = r["end"]
-                prev["text"] = f"{prev['text']} {r['text']}".strip()
-            else:
-                if prev:
-                    merged_results.append(prev)
-                prev = r
-        if prev:
-            merged_results.append(prev)
+        # Flatten results
+        results = []
+        for i, seg_list in turn_segments.items():
+            results.extend(seg_list)
 
-        full_text = " ".join([s.text for s in segments])
+        print("Detected speakers:", set(speaker for _, _, speaker in diarization_turns))
+
+        # Optional deduplication to avoid repeated lines
+        seen = set()
+        unique_results = []
+        for r in results:
+            key = (r["start"], r["end"], r["speaker"], r["text"])
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(r)
+        results = unique_results
+
+        # === Full transcription (no speaker tags)
+        full_text = " ".join([s["text"] for s in segments])
 
         return jsonify({
             "transcription": full_text,
-            "lines": merged_results,
-            "file": None
+            "speaker_segments": results
         })
+    
 
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Audio normalization failed", "details": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": "Processing failed", "details": str(e)}), 500
     finally:
         os.remove(audio_path)
         if os.path.exists(normalized_path):
